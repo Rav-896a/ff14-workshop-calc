@@ -1,3 +1,5 @@
 streamlit
 pandas
 opencc-python-reimplemented
+requests
+beautifulsoup4
