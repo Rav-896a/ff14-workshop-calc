@@ -33,31 +33,48 @@ with st.sidebar:
 def scrape_huiji_wiki(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        res = requests.get(url, headers=headers)
+        res = requests.get(url, headers=headers, timeout=10)
         res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 尋找 Wiki 中的材料表格（灰機 Wiki 常見結構）
+        # 移除不需要的干擾元素（如腳註、腳本）
+        for tag in soup(['script', 'style', 'sup']):
+            tag.decompose()
+
         materials = []
         
-        # 嘗試尋找包含 "材料" 關鍵字的表格
-        tables = soup.find_all('table')
-        for table in tables:
-            rows = table.find_all('tr')
-            for row in rows:
-                cols = row.find_all(['td', 'th'])
-                if len(cols) >= 2:
-                    text = row.get_text().strip()
-                    # 正則表達式：匹配 名稱 x 數字
-                    match = re.search(r'(.+?)\s*[×x]\s*(\d+)', text)
-                    if match:
-                        name = match.group(1).strip()
-                        qty = match.group(2).strip()
-                        # 試著抓取來源（如果有第三欄）
-                        source = cols[2].get_text().strip() if len(cols) > 2 else "Wiki 抓取"
-                        materials.append(f"{name}, {qty}, {source}")
+        # 策略 A：尋找所有包含「×」或「x」數字的文字行
+        # 這是最暴力但也最有效的方式，能抓到隱藏在各種標籤裡的材料
+        # 我們掃描所有的表格行 (tr) 和 清單項目 (li)
+        potential_elements = soup.find_all(['tr', 'li', 'p'])
         
-        return "\n".join(materials) if materials else "找到網頁但無法解析材料表格，請確認網址正確。"
+        for el in potential_elements:
+            text = el.get_text(separator=" ", strip=True)
+            # 正則表達式強化：匹配「名稱 × 數量」或「名稱 x 數量」
+            # 支援「白钢锭 × 30」或「白钢锭×30」
+            match = re.search(r'([^\s\d\x00-\x7f]+.*?)\s*[×x*]\s*(\d+)', text)
+            
+            if match:
+                name = match.group(1).strip()
+                qty = match.group(2).strip()
+                
+                # 過濾掉一些可能的雜訊（例如等級要求）
+                if len(name) > 1 and not name.isdigit():
+                    materials.append(f"{name}, {qty}, Wiki自動抓取")
+        
+        # 策略 B：去重（因為有些材料可能出現在不同的標籤層級中）
+        seen = set()
+        unique_materials = []
+        for m in materials:
+            if m not in seen:
+                unique_materials.append(m)
+                seen.add(m)
+        
+        if unique_materials:
+            return "\n".join(unique_materials)
+        else:
+            return "抓取成功但未發現材料數據。請確認該頁面是否包含『名稱 × 數量』格式的文字。"
+            
     except Exception as e:
         return f"連線錯誤: {str(e)}"
 
