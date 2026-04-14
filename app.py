@@ -1,154 +1,125 @@
 import streamlit as st
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
 from opencc import OpenCC
 import re
 
 # 初始化轉換器
 cc = OpenCC('s2twp')
 
-st.set_page_config(page_title="FF14 部隊工房自動計算器", layout="wide")
+st.set_page_config(page_title="FF14 部隊工房材料計算器", layout="wide")
 
+# 自定義 CSS
 st.markdown("""
     <style>
     .stCheckbox { font-size: 1.2rem; }
     .main { background-color: #f9f9f9; }
+    .st-emotion-cache-1kyx001 { padding: 1.5rem; border-radius: 8px; }
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🛠️ FF14 部隊工房材料計算器 (自動抓取版)")
+st.title("🛠️ FF14 部隊工房材料計算器")
+st.write("自動簡轉繁，並從雜亂的 Wiki 文字中提取材料。")
 
-# --- 側邊欄設定 ---
+# 側邊欄
 with st.sidebar:
     st.header("1. 專案設定")
-    multiplier = st.number_input("預計製作數量", min_value=1, value=1, step=1)
+    multiplier = st.number_input("製作數量", min_value=1, value=1)
     auto_convert = st.checkbox("自動簡轉繁", value=True)
     
     st.divider()
-    st.header("2. 數據來源")
-    data_mode = st.radio("選擇輸入方式", ["自動抓取網址", "手動貼上數據"])
+    st.header("2. 資料輸入")
+    st.write("💡 **最強撇步**：直接去 Wiki 頁面全選(Ctrl+A)並複製，直接貼在下方框框即可！")
+    raw_input = st.text_area("在此貼上 Wiki 文字內容", height=400)
 
-# --- 核心邏輯：爬蟲功能 ---
-def scrape_huiji_wiki(url):
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        res = requests.get(url, headers=headers, timeout=10)
-        res.encoding = 'utf-8'
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # 移除干擾元素
-        for tag in soup(['script', 'style', 'sup']):
-            tag.decompose()
-
-        materials = []
-        
-        # 策略一：針對灰機 Wiki 物品頁面最核心的材料區塊
-        # 通常位於 class 包含 'xiv-item-sources' 或 'xiv-item-recipe' 的區塊
-        source_sections = soup.find_all('div', class_=re.compile(r'xiv-item-sources|xiv-item-recipe'))
-        
-        if not source_sections:
-            # 如果找不到特定區塊，就掃描整個內容區 (mw-content-text 是 Wiki 標準內容區)
-            source_sections = [soup.find('div', class_='mw-parser-output')]
-
-        for section in source_sections:
-            if not section: continue
-            
-            # 尋找所有文字行，特別是包含「×」的
-            lines = section.get_text(separator="\n").split('\n')
-            for line in lines:
-                line = line.strip()
-                # 匹配：[物品名稱] × [數量] (例如：白钢锭 × 30)
-                # 正則說明：([^\s\d]+.*?) 匹配非數字開頭的名稱，\s*[×x]\s* 匹配乘號，(\d+) 匹配數量
-                match = re.search(r'([^\s\d\x00-\x7f]+.*?)\s*[×x]\s*(\d+)', line)
-                if match:
-                    name = match.group(1).strip()
-                    qty = match.group(2).strip()
-                    # 嘗試在同一行找來源資訊，通常在括號內 [ ]
-                    source_match = re.search(r'\[(.*?)\]', line)
-                    source = source_match.group(1) if source_match else "製作/兌換"
-                    
-                    materials.append(f"{name}, {qty}, {source}")
-
-        # 策略二：去重並過濾
-        unique_materials = []
-        seen = set()
-        for m in materials:
-            if m not in seen:
-                # 過濾掉一些明顯不是材料的抓取結果（例如等級限制）
-                name_part = m.split(',')[0]
-                if "级" not in name_part[-1:] and "★" not in name_part:
-                    unique_materials.append(m)
-                    seen.add(m)
-
-        if unique_materials:
-            return "\n".join(unique_materials)
-        else:
-            return "抓取成功但未解析到材料。建議將 Wiki 頁面的『材料』區域手動全選複製，直接貼到『手動貼上』區塊，App 一樣能識別。"
-            
-    except Exception as e:
-        return f"連線錯誤: {str(e)}"
-        
-# --- 核心邏輯：解析與呈現 ---
-def parse_data(data, convert_to_tw):
+# 強化的解析邏輯
+def smart_parse(data, multiplier, convert):
     lines = data.strip().split('\n')
     parsed_items = []
+    seen_names = set() # 避免重複抓取
+
     for line in lines:
-        if line.strip():
-            processed_line = cc.convert(line) if convert_to_tw else line
-            parts = [p.strip() for p in re.split(r'[,，\t\s]+', processed_line)]
-            if len(parts) >= 2:
-                name = parts[0]
-                qty_str = "".join(filter(str.isdigit, parts[1]))
-                base_qty = int(qty_str) if qty_str else 0
-                source = parts[2] if len(parts) > 2 else "基本材料"
-                parsed_items.append({"材料名稱": name, "總共所需": base_qty * multiplier, "來源": source})
+        if convert:
+            line = cc.convert(line)
+        
+        # 核心正則：匹配 [名稱] [分隔符 ×/x/*] [數字]
+        # 範例：白钢锭 × 30, 钴铁铆钉 x 30
+        match = re.search(r'([^\s\d\x00-\x7f]+.*?)\s*[×x*]\s*(\d+)', line)
+        
+        if match:
+            name = match.group(1).strip()
+            # 排除掉一些常見的雜訊標籤
+            if any(x in name for x in ["所需等級", "物品等級", "製作條件"]):
+                continue
+            
+            try:
+                qty = int(match.group(2))
+            except:
+                qty = 0
+                
+            if name not in seen_names and qty > 0:
+                # 試著從原始行抓取來源 (例如 [ ] 內的文字)
+                source_match = re.search(r'\[(.*?)\]', line)
+                source = source_match.group(1) if source_match else "基礎材料/製作"
+                
+                parsed_items.append({
+                    "材料名稱": name,
+                    "每件所需": qty,
+                    "總共所需": qty * multiplier,
+                    "來源": source
+                })
+                seen_names.add(name)
+                
     return parsed_items
 
-# --- 主畫面 UI ---
-final_raw_data = ""
-
-if data_mode == "自動抓取網址":
-    wiki_url = st.text_input("輸入灰機 Wiki 網址 (例如零件頁面)", placeholder="https://ff14.huijiwiki.com/wiki/Item:蛟龙级潜艇船体")
-    if st.button("開始抓取"):
-        with st.spinner('正在讀取 Wiki 數據...'):
-            scraped_result = scrape_huiji_wiki(wiki_url)
-            st.session_state['scraped_data'] = scraped_result
+# 主畫面渲染
+if raw_input:
+    items = smart_parse(raw_input, multiplier, auto_convert)
     
-    if 'scraped_data' in st.session_state:
-        final_raw_data = st.text_area("抓取結果 (可手動微調)", value=st.session_state['scraped_data'], height=200)
-
-else:
-    final_raw_data = st.text_area("手動貼上數據", height=300, placeholder="名稱, 數量, 來源")
-
-# --- 渲染清單 ---
-if final_raw_data:
-    items = parse_data(final_raw_data, auto_convert)
     if items:
         df = pd.DataFrame(items)
-        st.header("📊 材料進度追蹤")
+        st.header(f"📊 材料清單 (預計製作 {multiplier} 份)")
         
-        tab1, tab2 = st.tabs(["✅ 收集清單", "📋 數據預覽"])
+        # 建立 Tab
+        tab1, tab2 = st.tabs(["✅ 進度追蹤", "📋 原始數據"])
+        
         with tab1:
-            completion_status = []
+            h1, h2, h3, h4 = st.columns([1, 4, 2, 2])
+            h1.write("**完成**")
+            h2.write("**材料名稱**")
+            h3.write("**總共所需**")
+            h4.write("**來源提示**")
+            st.divider()
+            
+            status = []
             for idx, row in df.iterrows():
                 c1, c2, c3, c4 = st.columns([1, 4, 2, 2])
-                is_done = c1.checkbox("", key=f"m_{idx}")
-                label = f"**{row['材料名稱']}**" if not is_done else f"~~{row['材料名稱']}~~"
-                c2.markdown(label)
+                is_done = c1.checkbox("", key=f"mat_{idx}")
+                
+                name_display = f"**{row['材料名稱']}**" if not is_done else f"~~{row['材料名稱']}~~"
+                c2.markdown(name_display)
                 c3.write(f"`{row['總共所需']}`")
                 
+                # 來源顏色標籤
                 src = row['來源']
-                if any(k in src for k in ["軍票", "兌換"]): c4.warning(f"🎫 {src}")
-                elif any(k in src for k in ["採集", "挖"]): c4.success(f"⛏️ {src}")
-                else: c4.write(src)
-                completion_status.append(is_done)
+                if "兌換" in src or "軍票" in src:
+                    c4.warning(f"🎫 {src}")
+                elif "採集" in src or "挖" in src:
+                    c4.success(f"⛏️ {src}")
+                else:
+                    c4.write(src)
+                status.append(is_done)
             
-            if completion_status:
-                progress = sum(completion_status) / len(completion_status)
+            if status:
+                progress = sum(status) / len(status)
+                st.divider()
+                st.subheader(f"整體收集進度: {int(progress*100)}%")
                 st.progress(progress)
-                st.write(f"進度: {int(progress*100)}%")
+                if progress == 1.0:
+                    st.balloons()
+        
+        with tab2:
+            st.dataframe(df)
     else:
-        st.info("請輸入有效數據或嘗試抓取。")
+        st.error("無法從貼上的文字中識別材料。請確認文字中包含『名稱 × 數量』。")
+else:
+    st.info("請在左側貼上 Wiki 資料以開始。您可以直接全選 Wiki 網頁並複製貼上。")
