@@ -32,52 +32,65 @@ with st.sidebar:
 # --- 核心邏輯：爬蟲功能 ---
 def scrape_huiji_wiki(url):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
         res = requests.get(url, headers=headers, timeout=10)
         res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 移除不需要的干擾元素（如腳註、腳本）
+        # 移除干擾元素
         for tag in soup(['script', 'style', 'sup']):
             tag.decompose()
 
         materials = []
         
-        # 策略 A：尋找所有包含「×」或「x」數字的文字行
-        # 這是最暴力但也最有效的方式，能抓到隱藏在各種標籤裡的材料
-        # 我們掃描所有的表格行 (tr) 和 清單項目 (li)
-        potential_elements = soup.find_all(['tr', 'li', 'p'])
+        # 策略一：針對灰機 Wiki 物品頁面最核心的材料區塊
+        # 通常位於 class 包含 'xiv-item-sources' 或 'xiv-item-recipe' 的區塊
+        source_sections = soup.find_all('div', class_=re.compile(r'xiv-item-sources|xiv-item-recipe'))
         
-        for el in potential_elements:
-            text = el.get_text(separator=" ", strip=True)
-            # 正則表達式強化：匹配「名稱 × 數量」或「名稱 x 數量」
-            # 支援「白钢锭 × 30」或「白钢锭×30」
-            match = re.search(r'([^\s\d\x00-\x7f]+.*?)\s*[×x*]\s*(\d+)', text)
+        if not source_sections:
+            # 如果找不到特定區塊，就掃描整個內容區 (mw-content-text 是 Wiki 標準內容區)
+            source_sections = [soup.find('div', class_='mw-parser-output')]
+
+        for section in source_sections:
+            if not section: continue
             
-            if match:
-                name = match.group(1).strip()
-                qty = match.group(2).strip()
-                
-                # 過濾掉一些可能的雜訊（例如等級要求）
-                if len(name) > 1 and not name.isdigit():
-                    materials.append(f"{name}, {qty}, Wiki自動抓取")
-        
-        # 策略 B：去重（因為有些材料可能出現在不同的標籤層級中）
-        seen = set()
+            # 尋找所有文字行，特別是包含「×」的
+            lines = section.get_text(separator="\n").split('\n')
+            for line in lines:
+                line = line.strip()
+                # 匹配：[物品名稱] × [數量] (例如：白钢锭 × 30)
+                # 正則說明：([^\s\d]+.*?) 匹配非數字開頭的名稱，\s*[×x]\s* 匹配乘號，(\d+) 匹配數量
+                match = re.search(r'([^\s\d\x00-\x7f]+.*?)\s*[×x]\s*(\d+)', line)
+                if match:
+                    name = match.group(1).strip()
+                    qty = match.group(2).strip()
+                    # 嘗試在同一行找來源資訊，通常在括號內 [ ]
+                    source_match = re.search(r'\[(.*?)\]', line)
+                    source = source_match.group(1) if source_match else "製作/兌換"
+                    
+                    materials.append(f"{name}, {qty}, {source}")
+
+        # 策略二：去重並過濾
         unique_materials = []
+        seen = set()
         for m in materials:
             if m not in seen:
-                unique_materials.append(m)
-                seen.add(m)
-        
+                # 過濾掉一些明顯不是材料的抓取結果（例如等級限制）
+                name_part = m.split(',')[0]
+                if "级" not in name_part[-1:] and "★" not in name_part:
+                    unique_materials.append(m)
+                    seen.add(m)
+
         if unique_materials:
             return "\n".join(unique_materials)
         else:
-            return "抓取成功但未發現材料數據。請確認該頁面是否包含『名稱 × 數量』格式的文字。"
+            return "抓取成功但未解析到材料。建議將 Wiki 頁面的『材料』區域手動全選複製，直接貼到『手動貼上』區塊，App 一樣能識別。"
             
     except Exception as e:
         return f"連線錯誤: {str(e)}"
-
+        
 # --- 核心邏輯：解析與呈現 ---
 def parse_data(data, convert_to_tw):
     lines = data.strip().split('\n')
