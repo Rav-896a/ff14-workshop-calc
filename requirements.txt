@@ -1,0 +1,3 @@
+streamlit
+pandas
+opencc-python-reimplemented
